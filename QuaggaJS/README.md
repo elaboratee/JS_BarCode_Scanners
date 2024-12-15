@@ -125,6 +125,7 @@ locate: function() {
         initCanvas();
     }
     ```
+    
 2. <b>Функция `locate`</b>
    - <b>Описание:</b> Основная функция для локализации штрих-кодов на изображении
    - <b>Входные данные:</b>
@@ -176,6 +177,7 @@ locate: function() {
         return boxes;
     }
    ```
+   
 3. <b>Функция `binarizeImage`</b>
     - <b>Описание:</b> Функция для бинаризации изображения при помощи пороговой обработки
     - <b>Входные данные:</b>
@@ -196,6 +198,7 @@ locate: function() {
         }
     }
     ```
+    
 4. <b>Функция `findPatches`</b>
     - <b>Описание:</b> Анализирует изображение, разбивая его на сетку патчей, скелетизирует каждый патч, находит элементы, похожие на полосы штрих-кодов и
       возвращает массив патчей, которые могут содержать штрих-коды
@@ -262,6 +265,7 @@ locate: function() {
         return patchesFound;
     }
     ```
+    
 5. <b>Функция `rasterizeAngularSimilarity`</b>
     - <b>Описание:</b> Группирует патчи на основе схожести угловой ориентации (ищет соединенные патчи, имеющие схожее направление)
     - <b>Входные данные:</b>
@@ -367,6 +371,7 @@ locate: function() {
         return label;
     }
     ```
+    
 6. <b>Функция `findBiggestConnectedAreas`</b>
     - <b>Описание:</b> Выполняет поиск наиболее крупных соединенных областей патчей. Анализирует сетку меток патчей и возвращает только области,
       содержащие достаточно патчей, чтобы потенациально представлять штрих-код
@@ -417,6 +422,60 @@ locate: function() {
         return topLabels;
     }
     ```
+
+7. <b>Функция `findBoxes`</b>
+    - <b>Описание:</b> Создает ограничивающие прямоугольники (bounding boxes) для наибольших областей, сгруппированных по угловой ориентации
+    - <b>Входные данные:</b>
+        - `topLabels` - наиболее крупные области патчей
+        - `maxLabel` - количество найденных областей (групп патчей)
+    - <b>Выходные данные:</b>
+        - `boxes` - массив координат ограничивающих прямоугольников
+    - <b>Процесс работы:</b>
+        - Для каждой области из `topLabels` производится обход всей сетки патчей и совершается отбор патчей, принадлежащих текущей области
+        - Для собранных патчей рассчитывается минимальный ограничивающий прямоугольник, охватывающий все патчи
+        - Если прямоугольник успешно создан, он добавляется в выходной массив
+    - <b>Код функции:</b>
+    ```js
+    function findBoxes(topLabels, maxLabel) {
+        var i,
+            j,
+            sum,
+            patches = [],
+            patch,
+            box,
+            boxes = [],
+            hsv = [0, 1, 1],
+            rgb = [0, 0, 0];
+    
+        for ( i = 0; i < topLabels.length; i++) {
+            sum = _patchLabelGrid.data.length;
+            patches.length = 0;
+            while (sum--) {
+                if (_patchLabelGrid.data[sum] === topLabels[i].label) {
+                    patch = _imageToPatchGrid.data[sum];
+                    patches.push(patch);
+                }
+            }
+            box = boxFromPatches(patches);
+            if (box) {
+                boxes.push(box);
+    
+                // draw patch-labels if requested
+                if (ENV.development && _config.debug.showRemainingPatchLabels) {
+                    for ( j = 0; j < patches.length; j++) {
+                        patch = patches[j];
+                        hsv[0] = (topLabels[i].label / (maxLabel + 1)) * 360;
+                        hsv2rgb(hsv, rgb);
+                        ImageDebug.drawRect(patch.pos, _subImageWrapper.size, _canvasContainer.ctx.binary,
+                            {color: "rgb(" + rgb.join(",") + ")", lineWidth: 2});
+                    }
+                }
+            }
+        }
+        return boxes;
+    }
+    ```
+
 
 ### skeletonizer.js
 
