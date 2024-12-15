@@ -475,10 +475,3 @@ locate: function() {
         return boxes;
     }
     ```
-
-
-### skeletonizer.js
-
-### rasterizer.js
-
-### tracer.js
