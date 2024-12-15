@@ -111,7 +111,7 @@ locate: function() {
     - <b>Входные данные:</b>
          - `inputImageWrapper` - обертка для входного изображения, предоставляющая доступ к пикселям изображения и его размерам
         - `config` - объект конфигурации, содержащий настройки алгоритма локализации
-    - <b>Процесс:</b>
+    - <b>Процесс работы:</b>
         - Конфигурация и входное изображение сохраняются в глобальные переменные
         - Инициализируются внутренние буферы и структуры данных, необходимые для работы локализатора
         - Настраивает холст для визуализации промежуточных шагов алгоритма (если отладка включена в конфигурации) 
@@ -131,7 +131,7 @@ locate: function() {
        - `_inputImageWrapper` - объект, содержащий данные исходного изображения
    - <b>Выходные данные:</b>
        - `boxes` - массив локазизованных областей с предполагаемым штрих-кодом
-   - <b>Процесс:</b>
+   - <b>Процесс работы:</b>
        - Если в конфигурации задан параметр `halfSample`, то выполняется уменьшение изображения в 2 раза по ширине и высоте
        - Выполняется бинаризация изображения при помощи функции `binarizeImage`
        - Изображение разделяется на сетку патчей, каждый из которых анализируется на содержание штрих-кода. Если найдено менее 5% патчей (в зависимости от
@@ -176,6 +176,247 @@ locate: function() {
         return boxes;
     }
    ```
+3. <b>Функция `binarizeImage`</b>
+    - <b>Описание:</b> Функция для бинаризации изображения при помощи пороговой обработки
+    - <b>Входные данные:</b>
+        - `_currentImageWrapper` - исходное изображение для бинаризации
+    - <b>Выходные данные:</b>
+        - `_binaryImageWrapper` - бинаризованное изображение
+    - <b>Процесс работы:</b>
+        - Выполняется бинаризация изображения при помощи пороговой обработки методом Оцу. Получается изображение,
+          где светлые области (потенциальные полосы штрих-кода) выделены на темном фоне
+        - Устанавливает значение всех пикселей на границе бинаризованного изображения равным 0 (черный цвет)
+    - <b>Код функции:</b>
+    ```js
+    function binarizeImage() {
+        otsuThreshold(_currentImageWrapper, _binaryImageWrapper);
+        _binaryImageWrapper.zeroBorder();
+        if (ENV.development && _config.debug.showCanvas) {
+            _binaryImageWrapper.show(_canvasContainer.dom.binary, 255);
+        }
+    }
+    ```
+4. <b>Функция `findPatches`</b>
+    - <b>Описание:</b> Анализирует изображение, разбивая его на сетку патчей, скелетизирует каждый патч, находит элементы, похожие на полосы штрих-кодов и
+      возвращает массив патчей, которые могут содержать штрих-коды
+    - <b>Входные данные:</b>
+        - `_numPatches` - объект, задающий количество патчей по ширине и высоте изображения
+        - `_subImageWrapper` - обертка текущего патча
+        - `_skelImageWrapper` - обертка скелетизированного патча
+        - `_labelImageWrapper` - обертка для данных о метках
+    - <b>Выходные данные:</b>
+        - `patchesFound` - массив патчей, содержаших полосы штрих-кода
+    - <b>Процесс работы:</b>
+        - Каждый из патчей изображения скелетизируется. Для скелетизированного изобраения устанавливается нулевое значение всех пикселей на границе
+        - Скелетизированные патчи растеризуются (также выполняется трассировка контуров) для выделения отдельных полос
+        - Выполняется расчет моментов (геометрических характеристик) для растеризованных патчей. В результате получается массив объектов,
+          содержащих различные характеристики такие, как центроид, угловая ориентация полос и вектор направления
+        - Выполняется анализ моментов и на их основе отбираются патчи, содержащие полосы штрих-кода
+    - <b>Код функции:</b>
+    ```js
+    function findPatches() {
+        var i,
+            j,
+            x,
+            y,
+            moments,
+            patchesFound = [],
+            rasterizer,
+            rasterResult,
+            patch;
+        for (i = 0; i < _numPatches.x; i++) {
+            for (j = 0; j < _numPatches.y; j++) {
+                x = _subImageWrapper.size.x * i;
+                y = _subImageWrapper.size.y * j;
+    
+                // seperate parts
+                skeletonize(x, y);
+    
+                // Rasterize, find individual bars
+                _skelImageWrapper.zeroBorder();
+                ArrayHelper.init(_labelImageWrapper.data, 0);
+                rasterizer = Rasterizer.create(_skelImageWrapper, _labelImageWrapper);
+                rasterResult = rasterizer.rasterize(0);
+    
+                if (ENV.development && _config.debug.showLabels) {
+                    _labelImageWrapper.overlay(_canvasContainer.dom.binary, Math.floor(360 / rasterResult.count),
+                        {x: x, y: y});
+                }
+    
+                // calculate moments from the skeletonized patch
+                moments = _labelImageWrapper.moments(rasterResult.count);
+    
+                // extract eligible patches
+                patchesFound = patchesFound.concat(describePatch(moments, [i, j], x, y));
+            }
+        }
+    
+        if (ENV.development && _config.debug.showFoundPatches) {
+            for ( i = 0; i < patchesFound.length; i++) {
+                patch = patchesFound[i];
+                ImageDebug.drawRect(patch.pos, _subImageWrapper.size, _canvasContainer.ctx.binary,
+                    {color: "#99ff00", lineWidth: 2});
+            }
+        }
+    
+        return patchesFound;
+    }
+    ```
+5. <b>Функция `rasterizeAngularSimilarity`</b>
+    - <b>Описание:</b> Группирует патчи на основе схожести угловой ориентации (ищет соединенные патчи, имеющие схожее направление)
+    - <b>Входные данные:</b>
+        - `patchesFound` - массив патчей, содержащих полосых штрих кодов
+    - <b>Выходные данные:</b>
+        - `label` - количество найденных областей (групп патчей)
+    - <b>Процесс работы:</b>
+        - Пока существуют необработанные патчи для каждого нового патчка увеличивается метка `label` и выполняется трассировка через `trace`
+        - Трассировка выполняется следующим образом:
+            - Для каждого патчка совершается обход соседних патчей
+            - Если соседний патч пустой, он пропускается
+            - Иначе, если схожесть между направлениями патчей, больше порога, рекурсивно вызывается функция трассировки для нового патча
+    - <b>Код функции:</b>
+    ```js
+    function rasterizeAngularSimilarity(patchesFound) {
+        var label = 0,
+            threshold = 0.95,
+            currIdx = 0,
+            j,
+            patch,
+            hsv = [0, 1, 1],
+            rgb = [0, 0, 0];
+    
+        function notYetProcessed() {
+            var i;
+            for ( i = 0; i < _patchLabelGrid.data.length; i++) {
+                if (_patchLabelGrid.data[i] === 0 && _patchGrid.data[i] === 1) {
+                    return i;
+                }
+            }
+            return _patchLabelGrid.length;
+        }
+    
+        function trace(currentIdx) {
+            var x,
+                y,
+                currentPatch,
+                idx,
+                dir,
+                current = {
+                    x: currentIdx % _patchLabelGrid.size.x,
+                    y: (currentIdx / _patchLabelGrid.size.x) | 0
+                },
+                similarity;
+    
+            if (currentIdx < _patchLabelGrid.data.length) {
+                currentPatch = _imageToPatchGrid.data[currentIdx];
+                // assign label
+                _patchLabelGrid.data[currentIdx] = label;
+                for ( dir = 0; dir < Tracer.searchDirections.length; dir++) {
+                    y = current.y + Tracer.searchDirections[dir][0];
+                    x = current.x + Tracer.searchDirections[dir][1];
+                    idx = y * _patchLabelGrid.size.x + x;
+    
+                    // continue if patch empty
+                    if (_patchGrid.data[idx] === 0) {
+                        _patchLabelGrid.data[idx] = Number.MAX_VALUE;
+                        continue;
+                    }
+    
+                    if (_patchLabelGrid.data[idx] === 0) {
+                        similarity = Math.abs(vec2.dot(_imageToPatchGrid.data[idx].vec, currentPatch.vec));
+                        if (similarity > threshold) {
+                            trace(idx);
+                        }
+                    }
+                }
+            }
+        }
+    
+        // prepare for finding the right patches
+        ArrayHelper.init(_patchGrid.data, 0);
+        ArrayHelper.init(_patchLabelGrid.data, 0);
+        ArrayHelper.init(_imageToPatchGrid.data, null);
+    
+        for ( j = 0; j < patchesFound.length; j++) {
+            patch = patchesFound[j];
+            _imageToPatchGrid.data[patch.index] = patch;
+            _patchGrid.data[patch.index] = 1;
+        }
+    
+        // rasterize the patches found to determine area
+        _patchGrid.zeroBorder();
+    
+        while (( currIdx = notYetProcessed()) < _patchLabelGrid.data.length) {
+            label++;
+            trace(currIdx);
+        }
+    
+        // draw patch-labels if requested
+        if (ENV.development && _config.debug.showPatchLabels) {
+            for ( j = 0; j < _patchLabelGrid.data.length; j++) {
+                if (_patchLabelGrid.data[j] > 0 && _patchLabelGrid.data[j] <= label) {
+                    patch = _imageToPatchGrid.data[j];
+                    hsv[0] = (_patchLabelGrid.data[j] / (label + 1)) * 360;
+                    hsv2rgb(hsv, rgb);
+                    ImageDebug.drawRect(patch.pos, _subImageWrapper.size, _canvasContainer.ctx.binary,
+                        {color: "rgb(" + rgb.join(",") + ")", lineWidth: 2});
+                }
+            }
+        }
+    
+        return label;
+    }
+    ```
+6. <b>Функция `findBiggestConnectedAreas`</b>
+    - <b>Описание:</b> Выполняет поиск наиболее крупных соединенных областей патчей. Анализирует сетку меток патчей и возвращает только области,
+      содержащие достаточно патчей, чтобы потенациально представлять штрих-код
+    - <b>Входные данные:</b>
+        - `maxLabel` - общее количество меток (каждая метка представляет уникальную группу патчей)
+        - `_patchLabelGrid` - сетка, в которой каждый патч связан с определенной меткой (или областью)
+    - <b>Выходные данные:</b>
+        - `topLabels` - массив объектов, представляющих наиболее крупные области патчей
+    - <b>Процесс работы:</b>
+        - Выполняется подсчет патчей для каждой метки
+        - Выполняется преобразование массива меток в массив объектов, содержащих метку и количество патчей для данной метки
+        - Выполняется сортировка областей в порядке убывания количества патчей
+        - Отбираются только те области, которые содержат не менее 5 патчей
+    - <b>Код функции:</b>
+    ```js
+    function findBiggestConnectedAreas(maxLabel){
+        var i,
+            sum,
+            labelHist = [],
+            topLabels = [];
+    
+        for ( i = 0; i < maxLabel; i++) {
+            labelHist.push(0);
+        }
+        sum = _patchLabelGrid.data.length;
+        while (sum--) {
+            if (_patchLabelGrid.data[sum] > 0) {
+                labelHist[_patchLabelGrid.data[sum] - 1]++;
+            }
+        }
+    
+        labelHist = labelHist.map(function(val, idx) {
+            return {
+                val: val,
+                label: idx + 1
+            };
+        });
+    
+        labelHist.sort(function(a, b) {
+            return b.val - a.val;
+        });
+    
+        // extract top areas with at least 6 patches present
+        topLabels = labelHist.filter(function(el) {
+            return el.val >= 5;
+        });
+    
+        return topLabels;
+    }
+    ```
 
 ### skeletonizer.js
 
